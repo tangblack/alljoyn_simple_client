@@ -16,33 +16,19 @@
 
 package org.alljoyn.bus.samples.simpleclient;
 
-import org.alljoyn.bus.BusAttachment;
-import org.alljoyn.bus.BusException;
-import org.alljoyn.bus.BusListener;
-import org.alljoyn.bus.Mutable;
-import org.alljoyn.bus.ProxyBusObject;
-import org.alljoyn.bus.SessionListener;
-import org.alljoyn.bus.SessionOpts;
-import org.alljoyn.bus.Status;
-
 import android.app.Activity;
 import android.app.ProgressDialog;
-import android.os.Bundle;
-import android.os.Handler;
-import android.os.HandlerThread;
-import android.os.Looper;
-import android.os.Message;
+import android.os.*;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.inputmethod.EditorInfo;
-import android.widget.ArrayAdapter;
-import android.widget.EditText;
-import android.widget.ListView;
-import android.widget.TextView;
-import android.widget.Toast;
+import android.widget.*;
+import org.alljoyn.bus.*;
+import org.alljoyn.cops.peergroupmanager.PeerGroupListener;
+import org.alljoyn.cops.peergroupmanager.PeerGroupManager;
 
 public class Client extends Activity {
     /* Load the native alljoyn_java library. */
@@ -162,25 +148,15 @@ public class Client extends Activity {
     }
     
     /* This class will handle all AllJoyn calls. See onCreate(). */
-    class BusHandler extends Handler {    	
-        /*
-         * Name used as the well-known name and the advertised name of the service this client is
-         * interested in.  This name must be a unique name both to the bus and to the network as a
-         * whole.
-         *
-         * The name uses reverse URL style of naming, and matches the name used by the service.
-         */
-        private static final String SERVICE_NAME = "org.alljoyn.bus.samples.simple";
-        private static final short CONTACT_PORT=42;
-
-        private BusAttachment mBus;
-        private ProxyBusObject mProxyObj;
-        private SimpleInterface mSimpleInterface;
-        
-        private int 	mSessionId;
-        private boolean mIsInASession;
-        private boolean mIsConnected;
-        private boolean mIsStoppingDiscovery;
+    class BusHandler extends Handler {
+		/*
+		* Group prefix is handed to the Peer Group Manager's constructor
+		* and used in discovery to find matching groups. A reverse URL
+		* naming style is used.
+		*/
+		private static final String GROUP_PREFIX = "org.alljoyn.bus.samples.simple";
+		private PeerGroupManager mPeerGroupManager;
+		private SimpleInterface mSimpleInterface;
         
         /* These are the messages sent to the BusHandler from the UI. */
         public static final int CONNECT = 1;
@@ -190,10 +166,6 @@ public class Client extends Activity {
 
         public BusHandler(Looper looper) {
             super(looper);
-            
-            mIsInASession = false;
-            mIsConnected = false;
-            mIsStoppingDiscovery = false;
         }
 
         @Override
@@ -202,129 +174,95 @@ public class Client extends Activity {
             /* Connect to a remote instance of an object implementing the SimpleInterface. */
             case CONNECT: {
             	org.alljoyn.bus.alljoyn.DaemonInit.PrepareDaemon(getApplicationContext());
-                /*
-                 * All communication through AllJoyn begins with a BusAttachment.
-                 *
-                 * A BusAttachment needs a name. The actual name is unimportant except for internal
-                 * security. As a default we use the class name as the name.
-                 *
-                 * By default AllJoyn does not allow communication between devices (i.e. bus to bus
-                 * communication). The second argument must be set to Receive to allow communication
-                 * between devices.
-                 */
-                mBus = new BusAttachment(getPackageName(), BusAttachment.RemoteMessage.Receive);
-                
-                /*
-                 * Create a bus listener class
-                 */
-                mBus.registerBusListener(new BusListener() {
-                    @Override
-                    public void foundAdvertisedName(String name, short transport, String namePrefix) {
-                    	logInfo(String.format("MyBusListener.foundAdvertisedName(%s, 0x%04x, %s)", name, transport, namePrefix));
-                    	/*
-                    	 * This client will only join the first service that it sees advertising
-                    	 * the indicated well-known name.  If the program is already a member of 
-                    	 * a session (i.e. connected to a service) we will not attempt to join 
-                    	 * another session.
-                    	 * It is possible to join multiple session however joining multiple 
-                    	 * sessions is not shown in this sample. 
-                    	 */
-                    	if(!mIsConnected) {
-                    	    Message msg = obtainMessage(JOIN_SESSION);
-                    	    msg.arg1 = transport;
-                    	    msg.obj = name;
-                    	    sendMessage(msg);
-                    	}
-                    }
-                });
+				/*
+				* PeerGroupManager handles all communication with AllJoyn.
+				*
+				* PeerGroupManager takes a group prefix, defined previously.
+				*
+				* Also, a PeerGroupListener is required to receive informative
+				* callback methods. Only desired callback methods must be overridden. In
+				* this client, we use the foundAdvertisedName and groupLost callback
+				* methods.
+				*
+				* Finally, an array of BusObjects that you want the PeerGroupManager
+				* to register with AllJoyn is passed in. This simple client is a pure
+				* client with no bus objects, so a null reference is passed in.
+				*/
+				PeerGroupListener mPeerGroupListener = new PeerGroupListener()
+				{
+					@Override
+					public void foundAdvertisedName(String groupName,
+							short transport)
+					{
+						logInfo(String.format("MyPeerGroupListener.foundAdvertisedName" +
+								"(%s, 0x%04x)", groupName, transport));
+						/*
+						* This client will only join the first service that
+						* it sees advertising a group with the indicated
+						* group prefix. If the program has already joined
+						* a group (i.e. connected to a service) we will not
+						* attempt to join another group.
+						*
+						* It is possible to join multiple groups,
+						* however joining multiple groups is not shown
+						* in this sample.
+						*/
+						Message msg = obtainMessage(JOIN_SESSION, groupName);
+						sendMessage(msg);
+					};
 
-                /* To communicate with AllJoyn objects, we must connect the BusAttachment to the bus. */
-                Status status = mBus.connect();
-                logStatus("BusAttachment.connect()", status);
-                if (Status.OK != status) {
-                    finish();
-                    return;
-                }
-
-                /*
-                 * Now find an instance of the AllJoyn object we want to call.  We start by looking for
-                 * a name, then connecting to the device that is advertising that name.
-                 *
-                 * In this case, we are looking for the well-known SERVICE_NAME.
-                 */
-                status = mBus.findAdvertisedName(SERVICE_NAME);
-                logStatus(String.format("BusAttachement.findAdvertisedName(%s)", SERVICE_NAME), status);
-                if (Status.OK != status) {
-                	finish();
-                	return;
-                }
+					@Override
+					public void groupLost(String groupName)
+					{
+						/*
+						* Upon losing a group advertisement, a message is sent to
+						* start the process dialog in android.
+						*/
+						logInfo(String.format("MyPeerGroupListener.groupLost(%s)", groupName));
+						mHandler.sendEmptyMessage(MESSAGE_START_PROGRESS_DIALOG);
+					};
+				};
+				mPeerGroupManager = new PeerGroupManager(GROUP_PREFIX, mPeerGroupListener,	null);
 
                 break;
             }
             case (JOIN_SESSION): {
-            	/*
-                 * If discovery is currently being stopped don't join to any other sessions.
-                 */
-                if (mIsStoppingDiscovery) {
-                    break;
-                }
-                
-                /*
-                 * In order to join the session, we need to provide the well-known
-                 * contact port.  This is pre-arranged between both sides as part
-                 * of the definition of the chat service.  As a result of joining
-                 * the session, we get a session identifier which we must use to 
-                 * identify the created session communication channel whenever we
-                 * talk to the remote side.
-                 */
-                short contactPort = CONTACT_PORT;
-                SessionOpts sessionOpts = new SessionOpts();
-                sessionOpts.transports = (short)msg.arg1;
-                Mutable.IntegerValue sessionId = new Mutable.IntegerValue();
-                
-                Status status = mBus.joinSession((String) msg.obj, contactPort, sessionId, sessionOpts, new SessionListener() {
-                    @Override
-                    public void sessionLost(int sessionId, int reason) {
-                        mIsConnected = false;
-                        logInfo(String.format("MyBusListener.sessionLost(sessionId = %d, reason = %d)", sessionId,reason));
-                        mHandler.sendEmptyMessage(MESSAGE_START_PROGRESS_DIALOG);
-                    }
-                });
-                logStatus("BusAttachment.joinSession() - sessionId: " + sessionId.value, status);
-                    
-                if (status == Status.OK) {
-                	/*
-                     * To communicate with an AllJoyn object, we create a ProxyBusObject.  
-                     * A ProxyBusObject is composed of a name, path, sessionID and interfaces.
-                     * 
-                     * This ProxyBusObject is located at the well-known SERVICE_NAME, under path
-                     * "/SimpleService", uses sessionID of CONTACT_PORT, and implements the SimpleInterface.
-                     */
-                	mProxyObj =  mBus.getProxyBusObject(SERVICE_NAME, 
-                										"/SimpleService",
-                										sessionId.value,
-                										new Class<?>[] { SimpleInterface.class });
-
-                	/* We make calls to the methods of the AllJoyn object through one of its interfaces. */
-                	mSimpleInterface =  mProxyObj.getInterface(SimpleInterface.class);
-                	
-                	mSessionId = sessionId.value;
-                	mIsConnected = true;
-                	mHandler.sendEmptyMessage(MESSAGE_STOP_PROGRESS_DIALOG);
-                }
-                break;
+				/*
+				* To join a group, the only information needed is the group name,
+				* obtained from the foundAdvertisedName callback method in this case.
+				*/
+				Status status = mPeerGroupManager.joinGroup((String) msg.obj);
+				logStatus("PeerGroupManager.joinGroup() - groupName: " + (String) msg.obj, status);
+				if (status == Status.OK) {
+					/*
+					* To communicate with a ProxyBusObject, we need the
+					* BusObject's remote interface. Getting the interface
+					* requires the Peer Id of the peer who owns the BusObjects,
+					* the name of the group both you and the peer are in,
+					* an object path descriptor, and the interface of the class.
+					*
+					* The service created the BusObject as well as the group,
+					* and the service's Peer Id is obtained here by using
+					* the getGroupHostPeerId method.
+					*/
+					mSimpleInterface = mPeerGroupManager.getRemoteObjectInterface(
+							mPeerGroupManager.getGroupHostPeerId((String) msg.obj),
+							(String) msg.obj, "/SimpleService", SimpleInterface.class);
+					mHandler.sendEmptyMessage(MESSAGE_STOP_PROGRESS_DIALOG);
+				}
+				break;
             }
             
             /* Release all resources acquired in the connect. */
             case DISCONNECT: {
-            	mIsStoppingDiscovery = true;
-            	if (mIsConnected) {
-                	Status status = mBus.leaveSession(mSessionId);
-                    logStatus("BusAttachment.leaveSession()", status);
-            	}
-                mBus.disconnect();
-                getLooper().quit();
-                break;
+            	/*
+				* PeerGroupManager has a cleanup method which unregisters bus objects and
+				* disconnects from AllJoyn. The PeerGroupManager should no longer be used
+				* after calling cleanup.
+				*/
+				mPeerGroupManager.cleanup();
+				mBusHandler.getLooper().quit();
+				break;
             }
             
             /*
