@@ -19,6 +19,7 @@ package org.alljoyn.bus.samples.simpleclient;
 import org.alljoyn.bus.BusException;
 import org.alljoyn.bus.annotation.BusInterface;
 import org.alljoyn.bus.annotation.BusMethod;
+import org.alljoyn.bus.annotation.BusSignal;
 
 /*
  * The BusInterface annotation is used to tell the code that this interface is an AllJoyn interface.
@@ -40,4 +41,7 @@ public interface SimpleInterface {
      */
     @BusMethod
     String Ping(String inStr) throws BusException;
+
+	@BusSignal(name = "Chat")
+	public void Chat(String str) throws BusException;
 }

@@ -20,15 +20,17 @@ import android.app.Activity;
 import android.app.ProgressDialog;
 import android.os.*;
 import android.util.Log;
-import android.view.KeyEvent;
-import android.view.Menu;
-import android.view.MenuInflater;
-import android.view.MenuItem;
+import android.view.*;
 import android.view.inputmethod.EditorInfo;
 import android.widget.*;
-import org.alljoyn.bus.*;
+import org.alljoyn.bus.BusException;
+import org.alljoyn.bus.BusObject;
+import org.alljoyn.bus.Status;
+import org.alljoyn.cops.peergroupmanager.BusObjectData;
 import org.alljoyn.cops.peergroupmanager.PeerGroupListener;
 import org.alljoyn.cops.peergroupmanager.PeerGroupManager;
+
+import java.util.ArrayList;
 
 public class Client extends Activity {
     /* Load the native alljoyn_java library. */
@@ -36,11 +38,12 @@ public class Client extends Activity {
         System.loadLibrary("alljoyn_java");
     }
     
-    private static final int MESSAGE_PING = 1;
-    private static final int MESSAGE_PING_REPLY = 2;
-    private static final int MESSAGE_POST_TOAST = 3;
+    static final int MESSAGE_PING = 1;
+    static final int MESSAGE_PING_REPLY = 2;
+    static final int MESSAGE_POST_TOAST = 3;
     private static final int MESSAGE_START_PROGRESS_DIALOG = 4;
     private static final int MESSAGE_STOP_PROGRESS_DIALOG = 5;
+	private static final int MESSAGE_CHAT = 6;
 
     private static final String TAG = "SimpleClient";
 
@@ -48,9 +51,13 @@ public class Client extends Activity {
     private ArrayAdapter<String> mListViewArrayAdapter;
     private ListView mListView;
     private Menu menu;
+	private Button chatButton;
     
     /* Handler used to make calls to AllJoyn methods. See onCreate(). */
     private BusHandler mBusHandler;
+
+	private PeerGroupManager mPeerGroupManager;
+	private SimpleService localSimpleService;
     
     private ProgressDialog mDialog;
     
@@ -67,6 +74,10 @@ public class Client extends Activity {
                     mListViewArrayAdapter.add("Reply:  " + ret);
                     mEditText.setText("");
                     break;
+				case MESSAGE_CHAT:
+					String chat = (String) msg.obj;
+					mListViewArrayAdapter.add("Chat:  " + chat);
+					break;
                 case MESSAGE_POST_TOAST:
                 	Toast.makeText(getApplicationContext(), (String) msg.obj, Toast.LENGTH_LONG).show();
                 	break;
@@ -109,6 +120,17 @@ public class Client extends Activity {
                 }
             });
 
+		chatButton = (Button) findViewById(R.id.chatButton);
+		chatButton.setOnClickListener(new View.OnClickListener()
+		{
+			@Override
+			public void onClick(View v)
+			{
+				Message msg = mBusHandler.obtainMessage(BusHandler.CHAT, mEditText.getText().toString());
+				mBusHandler.sendMessage(msg);
+			}
+		});
+
         /* Make all AllJoyn calls through a separate handler thread to prevent blocking the UI. */
         HandlerThread busThread = new HandlerThread("BusHandler");
         busThread.start();
@@ -146,6 +168,25 @@ public class Client extends Activity {
         /* Disconnect to prevent resource leaks. */
         mBusHandler.sendEmptyMessage(BusHandler.DISCONNECT);
     }
+
+	/* The class that is our AllJoyn service.  It implements the SimpleInterface. */
+	class SimpleService implements SimpleInterface, BusObject
+	{
+		public String Ping(String inStr) {
+			Log.i(TAG, "Ping(): " + inStr);
+			return "";
+		}
+
+		@Override
+		public void Chat(String str) throws BusException
+		{
+			/*
+			* Intentionally Blank. Implementation is
+			* contained within the signal handler.
+			*/
+			Log.i(TAG, "Chat(): " + str);
+		}
+	}
     
     /* This class will handle all AllJoyn calls. See onCreate(). */
     class BusHandler extends Handler {
@@ -155,7 +196,6 @@ public class Client extends Activity {
 		* naming style is used.
 		*/
 		private static final String GROUP_PREFIX = "org.alljoyn.bus.samples.simple";
-		private PeerGroupManager mPeerGroupManager;
 		private SimpleInterface mSimpleInterface;
         
         /* These are the messages sent to the BusHandler from the UI. */
@@ -163,6 +203,9 @@ public class Client extends Activity {
         public static final int JOIN_SESSION = 2;
         public static final int DISCONNECT = 3;
         public static final int PING = 4;
+		public static final int CHAT = 5;
+
+		private String groupName;
 
         public BusHandler(Looper looper) {
             super(looper);
@@ -196,6 +239,8 @@ public class Client extends Activity {
 					{
 						logInfo(String.format("MyPeerGroupListener.foundAdvertisedName" +
 								"(%s, 0x%04x)", groupName, transport));
+						BusHandler.this.groupName = groupName;
+
 						/*
 						* This client will only join the first service that
 						* it sees advertising a group with the indicated
@@ -222,7 +267,17 @@ public class Client extends Activity {
 						mHandler.sendEmptyMessage(MESSAGE_START_PROGRESS_DIALOG);
 					};
 				};
-				mPeerGroupManager = new PeerGroupManager(GROUP_PREFIX, mPeerGroupListener,	null);
+
+				/*
+				* Create a BusObject array
+				*/
+				localSimpleService = new SimpleService();
+				ArrayList<BusObjectData> busObjects = new ArrayList<BusObjectData>();
+				busObjects.add(new BusObjectData(localSimpleService, "/SimpleService"));
+				/*
+				* Create the PeerGroupManager
+				*/
+				mPeerGroupManager = new PeerGroupManager(GROUP_PREFIX, mPeerGroupListener, busObjects);
 
                 break;
             }
@@ -283,11 +338,32 @@ public class Client extends Activity {
                 }
                 break;
             }
-            default:
+
+			case CHAT: {
+				sendUiMessage(MESSAGE_CHAT, msg.obj);
+
+				SimpleInterface mSimpleSignalInterface = mPeerGroupManager.getSignalInterface(
+						//								mPeerGroupManager.getGroupHostPeerId(groupName),
+						groupName,
+						localSimpleService,
+						SimpleInterface.class);
+				try
+				{
+					mSimpleSignalInterface.Chat((String) msg.obj);
+				}
+				catch (BusException e)
+				{
+					e.printStackTrace();
+					Log.e(TAG, "SimpleInterface.Chat(): " + e.toString());
+				}
+				break;
+			}
+
+			default:
                 break;
             }
         }
-        
+
         /* Helper function to send a message to the UI thread. */
         private void sendUiMessage(int what, Object obj) {
             mHandler.sendMessage(mHandler.obtainMessage(what, obj));
